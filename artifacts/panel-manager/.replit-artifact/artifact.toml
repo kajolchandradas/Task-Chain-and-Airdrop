@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/"
+title = "Panel Manager"
+description = "A mobile earnings and rewards app with authentication, earning activities, games, wallet tracking, leaderboard, support, and an admin panel."
+version = "1.0.0"
+id = "artifacts/panel-manager"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/" ]
+localPort = 23609
+
+[services.development]
+run = "pnpm --filter @workspace/panel-manager run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/panel-manager", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/panel-manager", "run", "serve" ]
+
+[services.env]
+PORT = "23609"
+BASE_PATH = "/"
