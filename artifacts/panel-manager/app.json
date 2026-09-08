@@ -1,20 +1,25 @@
 {
   "expo": {
-    "name": "Panel Manager",
-    "slug": "panel-manager",
+    "name": "Task Chain & Airdrop",
+    "slug": "taskchainairdrop",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "panel-manager",
+    "scheme": "taskchainairdrop",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.taskchainairdrop.app"
     },
-    "android": {},
+    "android": {
+      "package": "com.taskchainairdrop.app"
+    },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router"
+    ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
