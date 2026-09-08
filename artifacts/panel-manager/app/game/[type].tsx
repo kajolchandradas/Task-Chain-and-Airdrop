@@ -27,13 +27,12 @@ const GAME_CONFIG: Record<string, { title: string; desc: string; gradient: [stri
   fun_quiz: { title: "Fun Quiz", desc: "Test your knowledge!", gradient: ["#3b82f6", "#1d4ed8"], icon: "help-circle" },
 };
 
-const QUIZ_QUESTIONS = [
-  { q: "What is the capital of Bangladesh?", opts: ["Dhaka", "Chittagong", "Sylhet", "Rajshahi"], ans: 0 },
-  { q: "How many months in a year?", opts: ["10", "11", "12", "13"], ans: 2 },
-  { q: "Which river flows through Dhaka?", opts: ["Meghna", "Padma", "Buriganga", "Jamuna"], ans: 2 },
-  { q: "What is 15 x 6?", opts: ["80", "85", "90", "95"], ans: 2 },
-  { q: "Bangladesh independence year?", opts: ["1969", "1970", "1971", "1972"], ans: 2 },
-];
+type QuizQuestion = {
+  id: number;
+  question: string;
+  options: string[];
+  category: string;
+};
 
 const LUCKY_SYMBOLS = ["🍎","🍊","🍋","🍇","🍓","🌸","🌺","🦁","🐯","🐸"];
 const SEGMENT_COLORS = ["#E2136E","#f59e0b","#10b981","#3b82f6","#8b5cf6","#ef4444","#0ea5e9","#14b8a6","#f97316","#06b6d4","#84cc16","#ec4899"];
@@ -314,9 +313,14 @@ export default function GameScreen() {
   const [reward, setReward] = useState(0);
   const [adWatched, setAdWatched] = useState(false);
   const [todayPlays, setTodayPlays] = useState(0);
-  const [quizQ, setQuizQ] = useState(0);
   const [selectedOpt, setSelectedOpt] = useState<number | null>(null);
   const [quizCorrect, setQuizCorrect] = useState<boolean | null>(null);
+  const [quizSessionId, setQuizSessionId] = useState<string | null>(null);
+  const [quizQuestion, setQuizQuestion] = useState<QuizQuestion | null>(null);
+  const [quizNumber, setQuizNumber] = useState(0);
+  const [quizTotal, setQuizTotal] = useState(15);
+  const [quizStartedAt, setQuizStartedAt] = useState(0);
+  const [quizLoading, setQuizLoading] = useState(false);
   const [scratchPrize, setScratchPrize] = useState(0);
   const [scratchDone, setScratchDone] = useState(false);
   const [winSegment, setWinSegment] = useState(-1);
@@ -361,7 +365,33 @@ export default function GameScreen() {
       });
       const data = await res.json();
       setTodayPlays(data.todayPlays ?? 0);
+      if (type === "fun_quiz") {
+        setQuizTotal(data.questionsPerPlay ?? 15);
+      }
     } catch {}
+  }
+
+  async function startQuiz() {
+    setQuizLoading(true);
+    try {
+      const res = await fetch(`${getApiUrl()}api/games/quiz/start`, {
+        method: "POST",
+        headers: { ...authHeader(uid), "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setQuizSessionId(data.sessionId);
+      setQuizQuestion(data.question);
+      setQuizNumber(data.questionNumber);
+      setQuizTotal(data.totalQuestions);
+      setQuizStartedAt(Date.now());
+      setSelectedOpt(null);
+      setQuizCorrect(null);
+    } catch (error) {
+      Alert.alert("Quiz unavailable", (error as Error).message);
+    } finally {
+      setQuizLoading(false);
+    }
   }
 
   async function submitPlay(useAdFlag = false) {
@@ -476,6 +506,10 @@ export default function GameScreen() {
     setReward(0);
     setSelectedOpt(null);
     setQuizCorrect(null);
+    setQuizSessionId(null);
+    setQuizQuestion(null);
+    setQuizNumber(0);
+    setQuizStartedAt(0);
     setScratchPrize(0);
     setScratchDone(false);
     setWinSegment(-1);
@@ -483,28 +517,39 @@ export default function GameScreen() {
     setSpinning(false);
     rewardAnim.setValue(0);
     spinAnim.setValue(0);
-    setQuizQ(Math.floor(Math.random() * QUIZ_QUESTIONS.length));
   }
 
   async function handleQuizAnswer(optIdx: number) {
-    const correct = QUIZ_QUESTIONS[quizQ].ans === optIdx;
     setSelectedOpt(optIdx);
-    setQuizCorrect(correct);
-    if (correct) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setStatus("playing");
-      const data = await submitPlay(adWatched);
-      if (!data) return;
-      setReward(data.reward);
-      setTodayPlays(data.playsUsed);
-      setStatus("done");
-      Animated.spring(rewardAnim, { toValue: 1, useNativeDriver: Platform.OS !== "web", tension: 50 }).start();
-      refreshUser();
-    } else {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      setTimeout(() => {
-        Alert.alert("Wrong!", "That's not correct. Try again!", [{ text: "OK", onPress: resetGame }]);
-      }, 500);
+    if (!quizSessionId || !quizQuestion) return;
+    setQuizLoading(true);
+    try {
+      const res = await fetch(`${getApiUrl()}api/games/quiz/answer`, {
+        method: "POST",
+        headers: { ...authHeader(uid), "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: quizSessionId, answer: optIdx, elapsedMs: Date.now() - quizStartedAt }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setQuizCorrect(data.correct);
+      Haptics.notificationAsync(data.correct ? Haptics.NotificationFeedbackType.Success : Haptics.NotificationFeedbackType.Error);
+      if (data.complete) {
+        setReward(data.reward);
+        setTodayPlays(1);
+        setStatus("done");
+        Animated.spring(rewardAnim, { toValue: 1, useNativeDriver: Platform.OS !== "web", tension: 50 }).start();
+        refreshUser();
+      } else {
+        setQuizQuestion(data.next);
+        setQuizNumber(data.questionNumber);
+        setQuizStartedAt(Date.now());
+        setSelectedOpt(null);
+        setQuizCorrect(null);
+      }
+    } catch (error) {
+      Alert.alert("Quiz error", (error as Error).message);
+    } finally {
+      setQuizLoading(false);
     }
   }
 
@@ -560,27 +605,40 @@ export default function GameScreen() {
           </Animated.View>
         ) : type === "fun_quiz" && status !== "watching_ad" ? (
           <View style={styles.quizCard}>
-            <View style={styles.quizHeader}>
-              <Ionicons name="help-circle" size={32} color="#3b82f6" />
-              <Text style={styles.quizTitle}>Question</Text>
-            </View>
-            <Text style={styles.questionText}>{QUIZ_QUESTIONS[quizQ].q}</Text>
-            {QUIZ_QUESTIONS[quizQ].opts.map((opt, i) => (
-              <Pressable
-                key={i}
-                style={[
-                  styles.optionBtn,
-                  selectedOpt === i && quizCorrect && styles.optionCorrect,
-                  selectedOpt === i && !quizCorrect && styles.optionWrong,
-                ]}
-                onPress={() => selectedOpt === null && handleQuizAnswer(i)}
-                disabled={selectedOpt !== null}
-              >
-                <Text style={[styles.optionText, selectedOpt === i && { color: "#fff", fontFamily: "Inter_600SemiBold" }]}>
-                  {opt}
-                </Text>
-              </Pressable>
-            ))}
+            {quizQuestion ? (
+              <>
+                <View style={styles.quizHeader}>
+                  <Ionicons name="help-circle" size={32} color="#3b82f6" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.quizTitle}>Fun Quiz</Text>
+                    <Text style={styles.quizProgress}>Question {quizNumber} of {quizTotal} · Each answer gets less reward when you wait</Text>
+                  </View>
+                </View>
+                <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min(100, (quizNumber / quizTotal) * 100)}%` }]} /></View>
+                <Text style={styles.quizCategory}>{quizQuestion.category}</Text>
+                <Text style={styles.questionText}>{quizQuestion.question}</Text>
+                {quizQuestion.options.map((opt, i) => (
+                  <Pressable
+                    key={i}
+                    style={[styles.optionBtn, selectedOpt === i && quizCorrect && styles.optionCorrect, selectedOpt === i && quizCorrect === false && styles.optionWrong]}
+                    onPress={() => selectedOpt === null && !quizLoading && handleQuizAnswer(i)}
+                    disabled={selectedOpt !== null || quizLoading}
+                  >
+                    <Text style={[styles.optionText, selectedOpt === i && { color: "#fff", fontFamily: "Inter_600SemiBold" }]}>{opt}</Text>
+                  </Pressable>
+                ))}
+                {quizLoading && <ActivityIndicator color="#3b82f6" style={{ marginTop: 8 }} />}
+              </>
+            ) : (
+              <>
+                <Ionicons name="school" size={46} color="#3b82f6" style={{ alignSelf: "center", marginBottom: 10 }} />
+                <Text style={styles.quizTitle}>Daily Fun Quiz</Text>
+                <Text style={styles.quizIntro}>Every play contains {quizTotal} different general-knowledge questions. Users receive a different daily set, and faster answers earn more.</Text>
+                <Pressable style={[styles.playBtn, { backgroundColor: "#3b82f6" }]} onPress={startQuiz} disabled={quizLoading || todayPlays > 0}>
+                  {quizLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.playBtnText}>{todayPlays > 0 ? "Completed Today" : "Start Today's Quiz"}</Text>}
+                </Pressable>
+              </>
+            )}
           </View>
         ) : type === "scratch_card" && status !== "watching_ad" ? (
           <View>
@@ -802,6 +860,11 @@ const styles = StyleSheet.create({
   },
   quizHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 16 },
   quizTitle: { fontFamily: "Inter_700Bold", fontSize: 18, color: Colors.text },
+  quizProgress: { fontFamily: "Inter_400Regular", fontSize: 11, color: Colors.textMuted, marginTop: 3, lineHeight: 16 },
+  quizCategory: { alignSelf: "flex-start", backgroundColor: "#3b82f615", color: "#2563eb", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5, overflow: "hidden", fontFamily: "Inter_600SemiBold", fontSize: 11, marginBottom: 10 },
+  progressTrack: { height: 7, borderRadius: 4, backgroundColor: "#e5e7eb", overflow: "hidden", marginBottom: 14 },
+  progressFill: { height: "100%", borderRadius: 4, backgroundColor: "#3b82f6" },
+  quizIntro: { fontFamily: "Inter_400Regular", fontSize: 13, lineHeight: 20, color: Colors.textMuted, textAlign: "center", marginVertical: 14 },
   questionText: { fontFamily: "Inter_600SemiBold", fontSize: 16, color: Colors.text, lineHeight: 24, marginBottom: 20 },
   optionBtn: {
     backgroundColor: "#F8F8F8", borderRadius: 12, padding: 14, marginBottom: 10,

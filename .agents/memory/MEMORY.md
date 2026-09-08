@@ -1,0 +1,1 @@
+- [Panel Manager verification](panel-manager-verification.md) — run Expo diagnostics from the mobile artifact and refresh database declarations before API checks.

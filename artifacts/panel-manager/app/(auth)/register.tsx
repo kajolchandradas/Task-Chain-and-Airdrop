@@ -47,6 +47,10 @@ export default function RegisterScreen() {
       router.replace("/(tabs)");
     } catch (err: unknown) {
       const error = err as Error;
+      if ((error as Error & { code?: string }).code === "ACCOUNT_NOT_ACTIVE") {
+        router.replace({ pathname: "/(auth)/activation", params: { email: email.trim().toLowerCase() } });
+        return;
+      }
       Alert.alert("Registration Failed", error.message || "Something went wrong");
     } finally {
       setLoading(false);

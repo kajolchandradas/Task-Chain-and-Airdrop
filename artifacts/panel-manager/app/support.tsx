@@ -80,7 +80,37 @@ export default function SupportScreen() {
     sendMutation.mutate(text);
   }
 
-  const messages = (messagesData?.messages ?? []).slice().reverse();
+  const messages = messagesData?.messages ?? [];
+  const conversation = messagesData?.conversation;
+
+  async function endConversation() {
+    if (!conversation?.id) return;
+    try {
+      const res = await fetch(`${getApiUrl()}api/support/end`, {
+        method: "POST",
+        headers: { "x-user-id": String(uid), "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: conversation.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      await refetch();
+    } catch (error) {
+      Alert.alert("Could not end chat", (error as Error).message);
+    }
+  }
+
+  async function reopenConversation() {
+    try {
+      const res = await fetch(`${getApiUrl()}api/support/reopen`, {
+        method: "POST",
+        headers: { "x-user-id": String(uid), "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      await refetch();
+    } catch (error) {
+      Alert.alert("Could not reopen chat", (error as Error).message);
+    }
+  }
 
   return (
     <KeyboardAvoidingView
@@ -107,7 +137,12 @@ export default function SupportScreen() {
               </View>
             </View>
           </View>
-          {telegramLink ? (
+          {conversation?.status === "open" ? (
+            <Pressable onPress={endConversation} style={styles.endBtn}>
+              <Ionicons name="stop-circle-outline" size={18} color="#fff" />
+              <Text style={styles.endBtnText}>End</Text>
+            </Pressable>
+          ) : telegramLink ? (
             <Pressable onPress={() => Linking.openURL(telegramLink)} style={styles.telegramBtn}>
               <Ionicons name="paper-plane" size={18} color="#fff" />
             </Pressable>
@@ -124,7 +159,7 @@ export default function SupportScreen() {
         </Pressable>
       ) : null}
 
-      {((messagesData?.messages ?? []).some((m: { status?: string }) => m.status === "waiting" || m.status === "active")) ? (
+      {conversation?.status === "open" && messages.length > 0 ? (
         <View style={styles.queueBanner}>
           <Ionicons name="time-outline" size={17} color={Colors.warning} />
           <Text style={styles.queueBannerText}>
@@ -162,33 +197,24 @@ export default function SupportScreen() {
         </View>
 
         {/* Chat messages */}
-        {messages.map((msg: { id: number; message: string; reply: string | null; is_ai: boolean; status?: string; created_at: string }) => (
-          <View key={msg.id}>
-            {/* User message */}
-            <View style={styles.userMessage}>
+        {messages.map((msg: { id: number; sender: "user" | "admin" | "ai"; message: string; created_at: string }) => (
+          msg.sender === "user" ? (
+            <View key={msg.id} style={styles.userMessage}>
               <View style={styles.userBubble}>
                 <Text style={styles.userBubbleText}>{msg.message}</Text>
-                <Text style={styles.bubbleTime}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
+                <Text style={[styles.bubbleTime, { color: "rgba(255,255,255,0.7)" }]}>{new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
               </View>
-              <View style={styles.userIcon}>
-                <Text style={styles.userIconText}>{(user?.full_name ?? "U").charAt(0)}</Text>
+              <View style={styles.userIcon}><Text style={styles.userIconText}>{(user?.full_name ?? "U").charAt(0)}</Text></View>
+            </View>
+          ) : (
+            <View key={msg.id} style={styles.aiMessage}>
+              <View style={styles.aiIconSmall}><Ionicons name={msg.sender === "ai" ? "logo-android" : "person"} size={16} color={msg.sender === "ai" ? Colors.primary : Colors.warning} /></View>
+              <View style={styles.aiBubble}>
+                <Text style={styles.aiBubbleText}>{msg.message}</Text>
+                <Text style={styles.bubbleTime}>{msg.sender === "ai" ? "AI Assistant" : "Admin"}</Text>
               </View>
             </View>
-            {/* AI reply */}
-            {msg.reply && (
-              <View style={styles.aiMessage}>
-                <View style={styles.aiIconSmall}>
-                  <Ionicons name={msg.is_ai ? "logo-android" : "person"} size={16} color={msg.is_ai ? Colors.primary : Colors.warning} />
-                </View>
-                <View style={styles.aiBubble}>
-                  <Text style={styles.aiBubbleText}>{msg.reply}</Text>
-                  <Text style={styles.bubbleTime}>
-                    {msg.is_ai ? "AI Assistant" : msg.status === "waiting" ? "Live Support Queue" : "Admin"}
-                  </Text>
-                </View>
-              </View>
-            )}
-          </View>
+          )
         ))}
 
         {sendMutation.isPending && (
@@ -207,12 +233,17 @@ export default function SupportScreen() {
 
       {/* Input */}
       <View style={[styles.inputArea, { paddingBottom: Platform.OS === "ios" ? insets.bottom + 8 : 16 }]}>
-        {telegramLink && (
+        {conversation?.status === "closed" ? (
+          <Pressable style={styles.reopenBtn} onPress={reopenConversation}>
+            <Ionicons name="refresh-circle" size={20} color="#fff" />
+            <Text style={styles.reopenText}>Start a new support chat</Text>
+          </Pressable>
+        ) : telegramLink ? (
           <Pressable style={styles.telegramIconBtn} onPress={() => Linking.openURL(telegramLink)}>
             <Ionicons name="paper-plane" size={20} color="#2196F3" />
           </Pressable>
-        )}
-        <TextInput
+        ) : null}
+        {conversation?.status !== "closed" && <TextInput
           style={styles.input}
           placeholder="আপনার প্রশ্ন লিখুন..."
           placeholderTextColor={Colors.textMuted}
@@ -220,14 +251,14 @@ export default function SupportScreen() {
           onChangeText={setMessage}
           multiline
           maxLength={500}
-        />
-        <Pressable
+        />}
+        {conversation?.status !== "closed" && <Pressable
           style={[styles.sendBtn, !message.trim() && { opacity: 0.5 }]}
           onPress={() => sendMessage()}
           disabled={!message.trim() || sendMutation.isPending}
         >
           <Ionicons name="send" size={20} color="#fff" />
-        </Pressable>
+        </Pressable>}
       </View>
     </KeyboardAvoidingView>
   );
@@ -250,6 +281,8 @@ const styles = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center",
   },
+  endBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 16, backgroundColor: "rgba(255,255,255,0.2)" },
+  endBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 11, color: "#fff" },
   telegramBanner: {
     flexDirection: "row", alignItems: "center", gap: 10,
     backgroundColor: "#E3F2FD", paddingHorizontal: 16, paddingVertical: 10,
@@ -309,4 +342,6 @@ const styles = StyleSheet.create({
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center",
   },
+  reopenBtn: { flex: 1, height: 44, borderRadius: 22, backgroundColor: Colors.primary, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  reopenText: { fontFamily: "Inter_600SemiBold", color: "#fff", fontSize: 13 },
 });

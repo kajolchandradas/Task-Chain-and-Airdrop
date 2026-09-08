@@ -22,6 +22,7 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (email: string, password: string, deviceId?: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
+  activate: (email: string, code: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
   updateProfile: (fullName: string) => Promise<void>;
@@ -89,7 +90,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function login(email: string, password: string, deviceId?: string) {
     const res = await apiRequest("POST", "/api/auth/login", { email, password, deviceId });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Login failed");
+    if (!res.ok) {
+      const error = new Error(data.error || "Login failed") as Error & { code?: string; email?: string };
+      error.code = data.code;
+      error.email = data.email;
+      throw error;
+    }
     setUser(data.user);
     await AsyncStorage.setItem("user", JSON.stringify(data.user));
   }
@@ -98,8 +104,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await apiRequest("POST", "/api/auth/register", data);
     const result = await res.json();
     if (!res.ok) throw new Error(result.error || "Registration failed");
+    if (result.requiresActivation) {
+      const error = new Error("Account activation is required") as Error & { code?: string };
+      error.code = "ACCOUNT_NOT_ACTIVE";
+      throw error;
+    }
     setUser(result.user);
     await AsyncStorage.setItem("user", JSON.stringify(result.user));
+  }
+
+  async function activate(email: string, code: string) {
+    const res = await apiRequest("POST", "/api/auth/activation/verify", { email, code });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Activation failed");
+    setUser(data.user);
+    await AsyncStorage.setItem("user", JSON.stringify(data.user));
   }
 
   async function logout() {
@@ -136,6 +155,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading,
     login,
     register,
+    activate,
     logout,
     refreshUser,
     updateProfile,

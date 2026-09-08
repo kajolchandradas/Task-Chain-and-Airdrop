@@ -19,6 +19,8 @@ function authHeader(userId: number) {
   return { "x-user-id": String(userId) };
 }
 
+const REFERRAL_BASE_URL = "https://taskchainaridrop.blogspot.com/";
+
 export default function ProfileScreen() {
   const { user, logout, updateProfile, updateProfilePhoto } = useAuth();
   const insets = useSafeAreaInsets();
@@ -58,10 +60,7 @@ export default function ProfileScreen() {
 
   async function shareReferralLink() {
     if (!user?.referral_code) return;
-    const base = Platform.OS === "web" && typeof window !== "undefined"
-      ? window.location.origin
-      : getApiUrl().replace(/\/$/, "");
-    const link = `${base}/register?ref=${encodeURIComponent(user.referral_code)}`;
+    const link = `${REFERRAL_BASE_URL}?ref=${encodeURIComponent(user.referral_code)}`;
     await Share.share({
       message: `Join Earn Wallet and start earning: ${link}`,
       url: link,

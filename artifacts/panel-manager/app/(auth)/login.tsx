@@ -40,7 +40,12 @@ export default function LoginScreen() {
       await login(email.trim().toLowerCase(), password);
       router.replace("/(tabs)");
     } catch (err: unknown) {
-      Alert.alert("Login Failed", (err as Error).message || "Invalid email or password");
+      const error = err as Error & { code?: string; email?: string };
+      if (error.code === "ACCOUNT_NOT_ACTIVE") {
+        router.push({ pathname: "/(auth)/activation", params: { email: error.email ?? email.trim().toLowerCase() } });
+      } else {
+        Alert.alert("Login Failed", error.message || "Invalid email or password");
+      }
     } finally {
       setLoading(false);
     }

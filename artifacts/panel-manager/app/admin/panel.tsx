@@ -11,7 +11,7 @@ import Colors from "@/constants/colors";
 import { getApiUrl } from "@/lib/query-client";
 import { useAd } from "@/context/AdContext";
 
-type AdminTab = "dashboard" | "notifications" | "withdrawals" | "users" | "settings" | "ads" | "tasks" | "support" | "security";
+type AdminTab = "dashboard" | "notifications" | "withdrawals" | "users" | "settings" | "ads" | "tasks" | "support" | "security" | "activations" | "quiz";
 
 function adminHeaders(token: string) {
   return { "x-admin-token": token, "Content-Type": "application/json" };
@@ -62,6 +62,9 @@ export default function AdminPanelScreen() {
   const [supportMessages, setSupportMessages] = useState<Record<string, string>[]>([]);
   const [passwordResets, setPasswordResets] = useState<Record<string, string>[]>([]);
   const [supportQueue, setSupportQueue] = useState({ waiting: 0, active: 0 });
+  const [activations, setActivations] = useState<Record<string, string>[]>([]);
+  const [quizQuestions, setQuizQuestions] = useState<Record<string, unknown>[]>([]);
+  const [newQuiz, setNewQuiz] = useState({ question: "", options: ["", "", "", ""], answer: "0", category: "General Knowledge" });
   const [wdTab, setWdTab] = useState("pending");
   const [newTask, setNewTask] = useState({ title: "", url: "", category: "youtube", reward: "" });
   const [newNotif, setNewNotif] = useState({ title: "", message: "", type: "info" });
@@ -124,13 +127,55 @@ export default function AdminPanelScreen() {
     if (res.ok) { const d = await res.json(); setPasswordResets(d.resets); }
   }
 
+  async function loadActivations(t: string) {
+    const res = await fetch(`${getApiUrl()}api/admin/activations`, { headers: adminHeaders(t) });
+    if (res.ok) { const d = await res.json(); setActivations(d.activations); }
+  }
+
+  async function loadQuizQuestions(t: string) {
+    const res = await fetch(`${getApiUrl()}api/admin/quiz/questions`, { headers: adminHeaders(t) });
+    if (res.ok) { const d = await res.json(); setQuizQuestions(d.questions); }
+  }
+
   useEffect(() => {
     if (!token) return;
     if (tab === "withdrawals") loadWithdrawals(token, wdTab);
     if (tab === "users") loadUsers(token);
     if (tab === "notifications") loadNotifications(token);
     if (tab === "support") { loadSupport(token); loadPasswordResets(token); }
+    if (tab === "activations") loadActivations(token);
+    if (tab === "quiz") loadQuizQuestions(token);
   }, [tab, wdTab, token]);
+
+  async function approveActivation(id: string) {
+    const res = await fetch(`${getApiUrl()}api/admin/activations/${id}/approve`, { method: "POST", headers: adminHeaders(token) });
+    const data = await res.json();
+    if (!res.ok) return Alert.alert("Activation", data.error ?? "Could not approve request");
+    Alert.alert("Secret code generated", `Give this one-time code to the user:\n\n${data.activation.code}\n\nValid until ${new Date(data.activation.expires_at).toLocaleString()}`);
+    loadActivations(token);
+  }
+
+  async function addQuizQuestion() {
+    if (!newQuiz.question.trim() || newQuiz.options.some((option) => !option.trim())) return Alert.alert("Quiz", "Question and all four options are required.");
+    const res = await fetch(`${getApiUrl()}api/admin/quiz/questions`, {
+      method: "POST",
+      headers: adminHeaders(token),
+      body: JSON.stringify({ ...newQuiz, answer: Number(newQuiz.answer), options: newQuiz.options }),
+    });
+    const data = await res.json();
+    if (!res.ok) return Alert.alert("Quiz", data.error ?? "Could not add question");
+    setNewQuiz({ question: "", options: ["", "", "", ""], answer: "0", category: "General Knowledge" });
+    loadQuizQuestions(token);
+  }
+
+  async function toggleQuizQuestion(question: Record<string, unknown>) {
+    await fetch(`${getApiUrl()}api/admin/quiz/questions/${question.id}`, {
+      method: "PATCH",
+      headers: adminHeaders(token),
+      body: JSON.stringify({ isActive: !question.is_active }),
+    });
+    loadQuizQuestions(token);
+  }
 
   async function saveSettings() {
     setSaving(true);
@@ -451,6 +496,8 @@ export default function AdminPanelScreen() {
     { id: "ads", icon: "megaphone", label: "Ads" },
     { id: "tasks", icon: "list", label: "Tasks" },
     { id: "support", icon: "headset", label: "Support" },
+    { id: "activations", icon: "key", label: "Activations" },
+    { id: "quiz", icon: "help-circle", label: "Quiz Bank" },
     { id: "security", icon: "shield", label: "Security" },
   ];
 
@@ -976,15 +1023,13 @@ export default function AdminPanelScreen() {
                      {msg.status === "waiting" ? "WAITING" : msg.status === "active" ? "ACTIVE" : msg.status === "resolved" ? "CLOSED" : "AI ANSWERED"}
                    </Text>
                 </View>
-                <View style={{ backgroundColor: Colors.dark.bg, borderRadius: 8, padding: 10, marginBottom: 6 }}>
-                  <Text style={[styles.listSub, { color: Colors.dark.text }]}>❓ {msg.message}</Text>
-                </View>
-                {msg.reply && (
-                  <View style={{ backgroundColor: Colors.primary + "20", borderRadius: 8, padding: 10, marginBottom: 6 }}>
-                    <Text style={[styles.listSub, { color: Colors.dark.text }]}>{msg.is_ai === "true" ? "🤖" : "👤"} {msg.reply}</Text>
+                {(((msg as unknown as { messages?: Array<{ sender: string; message: string; created_at: string }> }).messages) ?? [{ sender: "user", message: msg.message, created_at: "" }]).map((threadMsg, index) => (
+                  <View key={`${msg.id}-${index}`} style={{ backgroundColor: threadMsg.sender === "user" ? Colors.dark.bg : Colors.primary + "20", borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                    <Text style={[styles.listSub, { color: Colors.dark.text }]}>{threadMsg.sender === "user" ? "👤" : threadMsg.sender === "ai" ? "🤖" : "🛡️"} {threadMsg.message}</Text>
+                    {threadMsg.created_at ? <Text style={styles.listDate}>{new Date(threadMsg.created_at).toLocaleString()}</Text> : null}
                   </View>
-                )}
-                 {(msg.status === "waiting" || msg.status === "active") && (
+                ))}
+                 {(msg.status === "active" || msg.status === "waiting") && (
                   <View style={{ flexDirection: "row", gap: 8 }}>
                      {msg.status === "waiting" && (
                        <Pressable style={[styles.approveBtn, styles.approveBtnWide, { backgroundColor: Colors.warning }]} onPress={() => claimSupport(msg.id)}>
@@ -1001,7 +1046,21 @@ export default function AdminPanelScreen() {
                     <Pressable style={styles.approveBtn} onPress={() => sendSupportReply(msg.id)}>
                       <Ionicons name="send" size={16} color="#fff" />
                     </Pressable>
+                    <Pressable style={[styles.rejectBtn, { paddingHorizontal: 10 }]} onPress={async () => {
+                      await fetch(`${getApiUrl()}api/admin/support/${msg.id}/close`, { method: "POST", headers: adminHeaders(token) });
+                      loadSupport(token);
+                    }}>
+                      <Ionicons name="stop-circle-outline" size={16} color="#fff" />
+                    </Pressable>
                   </View>
+                )}
+                {msg.status === "resolved" && (
+                  <Pressable style={[styles.banBtn, { backgroundColor: Colors.primary, alignSelf: "flex-start" }]} onPress={async () => {
+                    await fetch(`${getApiUrl()}api/admin/support/${msg.id}/reopen`, { method: "POST", headers: adminHeaders(token) });
+                    loadSupport(token);
+                  }}>
+                    <Text style={styles.banBtnText}>Reopen Conversation</Text>
+                  </Pressable>
                 )}
               </View>
             ))}
@@ -1028,6 +1087,73 @@ export default function AdminPanelScreen() {
                      <Text style={styles.approveBtnText}>Approve & Code</Text>
                    </Pressable>
                  )}
+              </View>
+            ))}
+          </View>
+        )}
+
+        {tab === "activations" && (
+          <View>
+            <DarkCard title="Account Activation Requests" accent={Colors.warning}>
+              <Text style={styles.darkInputLabel}>New users remain inactive until admin approves a one-time secret code.</Text>
+            </DarkCard>
+            <Text style={styles.sectionTitle}>Requests ({activations.length})</Text>
+            {activations.length === 0 && <EmptyState icon="key-outline" text="No activation requests" />}
+            {activations.map((request) => {
+              const activationUser = request.user as unknown as Record<string, string> | undefined;
+              return (
+                <View key={request.id} style={styles.listCard}>
+                  <View style={[styles.listIconWrap, { backgroundColor: Colors.warning + "20" }]}>
+                    <Ionicons name="key" size={20} color={Colors.warning} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.listTitle}>{activationUser?.full_name ?? request.email}</Text>
+                    <Text style={styles.listSub}>{request.email}</Text>
+                    <Text style={[styles.listDate, { color: request.status === "pending" ? Colors.warning : request.status === "used" ? Colors.success : Colors.primary }]}>
+                      {String(request.status).toUpperCase()} · {new Date(request.created_at).toLocaleString()}
+                    </Text>
+                    {request.status === "approved" && <Text style={[styles.listSub, { color: Colors.primary }]}>Code: {request.code}</Text>}
+                  </View>
+                  {request.status === "pending" && (
+                    <Pressable style={[styles.approveBtn, styles.approveBtnWide]} onPress={() => approveActivation(request.id)}>
+                      <Text style={styles.approveBtnText}>Approve & Code</Text>
+                    </Pressable>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {tab === "quiz" && (
+          <View>
+            <DarkCard title="Fun Quiz Rules" accent="#3b82f6">
+              <InlineField label="Questions per play (15–25)" value={s.quiz_questions_per_play ?? "15"} onChange={v => setVal("quiz_questions_per_play", v)} keyboardType="numeric" />
+              <InlineField label="Maximum question bank use" value={s.quiz_max_questions_per_play ?? "25"} onChange={v => setVal("quiz_max_questions_per_play", v)} keyboardType="numeric" />
+              <InlineField label="Base reward (TK)" value={s.quiz_base_reward ?? "5"} onChange={v => setVal("quiz_base_reward", v)} keyboardType="numeric" />
+              <InlineField label="Time limit per answer (seconds)" value={s.quiz_time_limit_seconds ?? "12"} onChange={v => setVal("quiz_time_limit_seconds", v)} keyboardType="numeric" />
+              <InlineField label="Slow-answer penalty (%)" value={s.quiz_slow_penalty_percent ?? "50"} onChange={v => setVal("quiz_slow_penalty_percent", v)} keyboardType="numeric" />
+              <SaveBtn onPress={saveSettings} saving={saving} />
+            </DarkCard>
+            <DarkCard title="Add General Knowledge Question" accent="#3b82f6">
+              <DarkInput label="Question" value={newQuiz.question} onChange={v => setNewQuiz(p => ({ ...p, question: v }))} placeholder="e.g. Which country..." />
+              {newQuiz.options.map((option, index) => (
+                <DarkInput key={index} label={`Option ${index + 1}${Number(newQuiz.answer) === index ? " (correct)" : ""}`} value={option} onChange={v => setNewQuiz(p => ({ ...p, options: p.options.map((item, itemIndex) => itemIndex === index ? v : item) }))} placeholder={`Answer option ${index + 1}`} />
+              ))}
+              <DarkInput label="Correct option (1–4)" value={String(Number(newQuiz.answer) + 1)} onChange={v => setNewQuiz(p => ({ ...p, answer: String(Math.max(0, Math.min(3, Number(v) - 1))) }))} keyboardType="numeric" />
+              <DarkInput label="Category" value={newQuiz.category} onChange={v => setNewQuiz(p => ({ ...p, category: v }))} placeholder="History, Science..." />
+              <SaveBtn label="Add Question" onPress={addQuizQuestion} saving={false} />
+            </DarkCard>
+            <Text style={styles.sectionTitle}>Question Bank ({quizQuestions.length})</Text>
+            {quizQuestions.map((question) => (
+              <View key={String(question.id)} style={styles.listCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.listTitle}>{String(question.question)}</Text>
+                  <Text style={styles.listSub}>{String(question.category)} · Correct: option {Number(question.answer) + 1}</Text>
+                </View>
+                <Pressable style={[styles.banBtn, { backgroundColor: question.is_active ? Colors.success : Colors.dark.border }]} onPress={() => toggleQuizQuestion(question)}>
+                  <Text style={styles.banBtnText}>{question.is_active ? "Active" : "Off"}</Text>
+                </Pressable>
               </View>
             ))}
           </View>
