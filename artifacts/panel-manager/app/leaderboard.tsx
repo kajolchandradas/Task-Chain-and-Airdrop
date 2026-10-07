@@ -9,7 +9,7 @@ import { router } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 
 type LeaderTab = "earned" | "referral" | "games";
 
@@ -22,7 +22,7 @@ export default function LeaderboardScreen() {
   const { data: leaderData, isLoading } = useQuery({
     queryKey: ["leaderboard", leaderTab, uid],
     queryFn: () =>
-      fetch(`${getApiUrl()}api/leaderboard/${leaderTab}`, { headers: { "x-user-id": String(uid) } }).then(r => r.json()),
+      fetch(`${getApiUrl()}api/leaderboard/${leaderTab}`, { headers: getUserAuthHeaders() }).then(r => r.json()),
     enabled: !!uid,
   });
 

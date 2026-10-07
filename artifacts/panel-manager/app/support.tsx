@@ -10,7 +10,7 @@ import { router } from "expo-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 
 const QUICK_QUESTIONS = [
   "Withdraw কিভাবে করবো?",
@@ -34,7 +34,7 @@ export default function SupportScreen() {
   const { data: messagesData, refetch } = useQuery({
     queryKey: ["support", uid],
     queryFn: () =>
-      fetch(`${getApiUrl()}api/support/messages`, { headers: { "x-user-id": String(uid) } }).then(r => r.json()),
+      fetch(`${getApiUrl()}api/support/messages`, { headers: getUserAuthHeaders() }).then(r => r.json()),
     enabled: !!uid,
   });
 
@@ -59,7 +59,7 @@ export default function SupportScreen() {
     mutationFn: async (msg: string) => {
       const res = await fetch(`${getApiUrl()}api/support/send`, {
         method: "POST",
-        headers: { "x-user-id": String(uid), "Content-Type": "application/json" },
+        headers: { ...getUserAuthHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ message: msg }),
       });
       const data = await res.json();
@@ -88,7 +88,7 @@ export default function SupportScreen() {
     try {
       const res = await fetch(`${getApiUrl()}api/support/end`, {
         method: "POST",
-        headers: { "x-user-id": String(uid), "Content-Type": "application/json" },
+        headers: { ...getUserAuthHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ conversationId: conversation.id }),
       });
       const data = await res.json();
@@ -103,7 +103,7 @@ export default function SupportScreen() {
     try {
       const res = await fetch(`${getApiUrl()}api/support/reopen`, {
         method: "POST",
-        headers: { "x-user-id": String(uid), "Content-Type": "application/json" },
+        headers: { ...getUserAuthHeaders(), "Content-Type": "application/json" },
       });
       if (!res.ok) throw new Error((await res.json()).error);
       await refetch();

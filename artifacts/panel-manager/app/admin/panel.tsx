@@ -14,7 +14,7 @@ import { useAd } from "@/context/AdContext";
 type AdminTab = "dashboard" | "notifications" | "withdrawals" | "users" | "settings" | "ads" | "tasks" | "support" | "security" | "activations" | "quiz";
 
 function adminHeaders(token: string) {
-  return { "x-admin-token": token, "Content-Type": "application/json" };
+  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
 const AD_NETWORKS = [
@@ -91,6 +91,11 @@ export default function AdminPanelScreen() {
         fetch(`${getApiUrl()}api/admin/settings`, { headers: adminHeaders(t) }),
         fetch(`${getApiUrl()}api/admin/tasks`, { headers: adminHeaders(t) }),
       ]);
+      if ([statsRes, settingsRes, tasksRes].some((response) => response.status === 401)) {
+        await AsyncStorage.removeItem("admin_token");
+        router.replace("/admin");
+        return;
+      }
       if (statsRes.ok) setStats(await statsRes.json());
       if (settingsRes.ok) setSettings(await settingsRes.json());
       if (tasksRes.ok) { const d = await tasksRes.json(); setTasks(d.tasks); }
@@ -354,7 +359,7 @@ export default function AdminPanelScreen() {
 
   async function changePin() {
     if (!currentPin || !newPin || !confirmPin) return Alert.alert("Error", "Fill in all PIN fields");
-    if (newPin.length < 4) return Alert.alert("Error", "New PIN must be at least 4 digits");
+    if (newPin.length < 6) return Alert.alert("Error", "New PIN must be at least 6 digits");
     if (!/^\d+$/.test(newPin)) return Alert.alert("Error", "PIN must contain digits only");
     if (newPin !== confirmPin) return Alert.alert("Error", "PINs do not match");
     setSaving(true);
@@ -376,6 +381,9 @@ export default function AdminPanelScreen() {
   }
 
   async function logout() {
+    try {
+      await fetch(`${getApiUrl()}api/admin/logout`, { method: "POST", headers: adminHeaders(token) });
+    } catch {}
     await AsyncStorage.removeItem("admin_token");
     router.replace("/admin");
   }
@@ -1163,7 +1171,7 @@ export default function AdminPanelScreen() {
           <View>
             <DarkCard title="Admin PIN" accent={Colors.primary}>
               <DarkInput label="Current PIN" value={currentPin} onChange={setCurrentPin} secureTextEntry keyboardType="numeric" placeholder="Current PIN" />
-              <DarkInput label="New PIN (min 4 digits)" value={newPin} onChange={setNewPin} secureTextEntry keyboardType="numeric" placeholder="New PIN" />
+              <DarkInput label="New PIN (6–8 digits)" value={newPin} onChange={setNewPin} secureTextEntry keyboardType="numeric" placeholder="New PIN" />
               <DarkInput label="Confirm New PIN" value={confirmPin} onChange={setConfirmPin} secureTextEntry keyboardType="numeric" placeholder="Confirm PIN" />
               {newPin.length > 0 && confirmPin.length > 0 && (
                 <View style={[styles.pinMatchRow, { backgroundColor: newPin === confirmPin ? Colors.success + "18" : Colors.danger + "18" }]}>

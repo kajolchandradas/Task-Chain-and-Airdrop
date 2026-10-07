@@ -9,12 +9,12 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 
-function authHeader(userId: number) {
-  return { "x-user-id": String(userId) };
+function authHeader(_userId: number) {
+  return getUserAuthHeaders();
 }
 
 const WITHDRAW_METHODS = [

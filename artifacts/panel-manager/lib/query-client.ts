@@ -1,6 +1,16 @@
 import { fetch } from "expo/fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
+let sessionToken: string | null = null;
+
+export function setSessionToken(token: string | null) {
+  sessionToken = token;
+}
+
+export function getUserAuthHeaders(): Record<string, string> {
+  return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+}
+
 /**
  * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
  * @returns {string} The API base URL
@@ -34,12 +44,11 @@ export async function apiRequest(
 
   const res = await fetch(url.toString(), {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers: { ...getUserAuthHeaders(), ...(data ? { "Content-Type": "application/json" } : {}) },
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
 
-  await throwIfResNotOk(res);
   return res;
 }
 
@@ -53,6 +62,7 @@ export const getQueryFn: <T>(options: {
     const url = new URL(queryKey.join("/") as string, baseUrl);
 
     const res = await fetch(url.toString(), {
+      headers: getUserAuthHeaders(),
       credentials: "include",
     });
 

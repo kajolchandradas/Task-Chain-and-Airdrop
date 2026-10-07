@@ -12,11 +12,11 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useAuth } from "@/context/AuthContext";
 import { useAd } from "@/context/AdContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 import * as Haptics from "expo-haptics";
 
-function authHeader(userId: number) {
-  return { "x-user-id": String(userId) };
+function authHeader(_userId: number) {
+  return getUserAuthHeaders();
 }
 
 const GAME_CONFIG: Record<string, { title: string; desc: string; gradient: [string, string]; icon: keyof typeof Ionicons.glyphMap }> = {

@@ -10,13 +10,13 @@ import { router } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 import { Share } from "react-native";
 import * as Haptics from "expo-haptics";
 import * as ImagePicker from "expo-image-picker";
 
-function authHeader(userId: number) {
-  return { "x-user-id": String(userId) };
+function authHeader(_userId: number) {
+  return getUserAuthHeaders();
 }
 
 const REFERRAL_BASE_URL = "https://taskchainaridrop.blogspot.com/";

@@ -2,6 +2,11 @@ import { Router, type Request } from "express";
 import { db } from "@workspace/db";
 import { panelState } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
+import { createHash, pbkdf2, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
+
+const pbkdf2Async = promisify(pbkdf2);
+const PASSWORD_HASH_ITERATIONS = 210_000;
 
 type User = {
   id: number;
@@ -96,8 +101,29 @@ type QuizSession = {
   current_index: number;
   correct: number;
   started_at: string;
+  question_started_at: string;
+  total_elapsed_ms: number;
   completed_at?: string;
   reward?: number;
+};
+
+type AuthSession = {
+  token_hash: string;
+  role: "user" | "admin";
+  user_id?: number;
+  created_at: string;
+  expires_at: string;
+};
+
+type PasswordResetRequest = {
+  id: number;
+  user_id: number;
+  email: string;
+  status: "pending" | "approved" | "used" | "expired";
+  code?: string;
+  created_at: string;
+  expires_at?: string;
+  approved_at?: string;
 };
 
 type NotificationItem = {
@@ -120,6 +146,8 @@ const checkins = new Set<string>();
 const adWatches = new Map<string, number>();
 const claimedEvents = new Set<string>();
 const activationRequests: ActivationRequest[] = [];
+const passwordResetRequests: PasswordResetRequest[] = [];
+const authSessions: AuthSession[] = [];
 const supportConversations: SupportConversation[] = [];
 const supportMessages: SupportMessage[] = [];
 const quizQuestions: QuizQuestion[] = [
@@ -155,11 +183,14 @@ let nextUserId = 1;
 let nextTransactionId = 1;
 let nextWithdrawalId = 1;
 let nextActivationId = 1;
+let nextPasswordResetId = 1;
 let nextConversationId = 1;
 let nextSupportMessageId = 1;
 let nextQuizSessionId = 1;
 let nextNotificationId = 3;
-let adminPin = "1234";
+let adminPin = process.env.ADMIN_PIN ?? "1234";
+let adminPinConfigured = Boolean(process.env.ADMIN_PIN);
+const adminLoginFailures = new Map<string, { attempts: number; windowStartedAt: number; blockedUntil: number }>();
 
 const tasks: Task[] = [
   { id: 1, title: "Visit the Earn Wallet community", url: "https://replit.com", category: "Community", reward: "1.00", is_active: true },
@@ -224,6 +255,8 @@ type PersistedState = {
   adWatches: Array<[string, number]>;
   claimedEvents: string[];
   activationRequests: ActivationRequest[];
+  passwordResetRequests: PasswordResetRequest[];
+  authSessions: AuthSession[];
   supportConversations: SupportConversation[];
   supportMessages: SupportMessage[];
   quizQuestions: QuizQuestion[];
@@ -258,6 +291,8 @@ async function loadPersistedState() {
     (state.adWatches ?? []).forEach(([key, value]) => adWatches.set(key, value));
     (state.claimedEvents ?? []).forEach((value) => claimedEvents.add(value));
     activationRequests.push(...(state.activationRequests ?? []));
+    passwordResetRequests.push(...(state.passwordResetRequests ?? []));
+    authSessions.push(...(state.authSessions ?? []));
     supportConversations.push(...(state.supportConversations ?? []));
     supportMessages.push(...(state.supportMessages ?? []));
     if (state.quizQuestions?.length) {
@@ -274,11 +309,18 @@ async function loadPersistedState() {
     nextTransactionId = state.counters?.nextTransactionId ?? (Math.max(0, ...transactions.map((t) => t.id)) + 1);
     nextWithdrawalId = state.counters?.nextWithdrawalId ?? (Math.max(0, ...withdrawals.map((w) => w.id)) + 1);
     nextActivationId = state.counters?.nextActivationId ?? (Math.max(0, ...activationRequests.map((a) => a.id)) + 1);
+    nextPasswordResetId = state.counters?.nextPasswordResetId ?? (Math.max(0, ...passwordResetRequests.map((r) => r.id)) + 1);
     nextConversationId = state.counters?.nextConversationId ?? (Math.max(0, ...supportConversations.map((c) => c.id)) + 1);
     nextSupportMessageId = state.counters?.nextSupportMessageId ?? (Math.max(0, ...supportMessages.map((m) => m.id)) + 1);
     nextQuizSessionId = state.counters?.nextQuizSessionId ?? (Math.max(0, ...quizSessions.map((s) => Number(s.id))) + 1);
     nextNotificationId = state.counters?.nextNotificationId ?? (Math.max(0, ...notifications.map((n) => n.id)) + 1);
-    adminPin = state.adminPin ?? adminPin;
+    if (process.env.ADMIN_PIN && state.adminPin === "1234") {
+      adminPin = process.env.ADMIN_PIN;
+      adminPinConfigured = true;
+    } else if (state.adminPin) {
+      adminPin = state.adminPin;
+      adminPinConfigured = state.adminPin !== "1234" || Boolean(process.env.ADMIN_PIN);
+    }
   } finally {
     resolveStateReady?.();
   }
@@ -294,11 +336,11 @@ function persistState() {
       checkins: [...checkins],
       adWatches: [...adWatches.entries()],
       claimedEvents: [...claimedEvents],
-      activationRequests, supportConversations, supportMessages,
+      activationRequests, passwordResetRequests, authSessions, supportConversations, supportMessages,
       quizQuestions, quizSessions, tasks, events,
       readNotifications: [...readNotifications],
       notifications, settings,
-      counters: { nextUserId, nextTransactionId, nextWithdrawalId, nextActivationId, nextConversationId, nextSupportMessageId, nextQuizSessionId, nextNotificationId },
+      counters: { nextUserId, nextTransactionId, nextWithdrawalId, nextActivationId, nextPasswordResetId, nextConversationId, nextSupportMessageId, nextQuizSessionId, nextNotificationId },
       adminPin,
     };
     await db.insert(panelState).values({ key: "main", value, updatedAt: new Date() })
@@ -323,9 +365,62 @@ function publicUser(user: User) {
   return { ...safe, isAdmin: user.email === "admin@earnwallet.app" };
 }
 
+async function hashPassword(password: string) {
+  const salt = randomBytes(16);
+  const derived = await pbkdf2Async(password, salt, PASSWORD_HASH_ITERATIONS, 32, "sha256");
+  return `pbkdf2$${PASSWORD_HASH_ITERATIONS}$${salt.toString("base64")}$${Buffer.from(derived).toString("base64")}`;
+}
+
+async function verifyPassword(stored: string, password: string) {
+  const [algorithm, iterationText, saltText, hashText] = stored.split("$");
+  if (algorithm === "pbkdf2" && iterationText && saltText && hashText) {
+    const iterations = Number(iterationText);
+    if (!Number.isSafeInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return { valid: false };
+    const expected = Buffer.from(hashText, "base64");
+    const actual = Buffer.from(await pbkdf2Async(password, Buffer.from(saltText, "base64"), iterations, expected.length, "sha256"));
+    return { valid: expected.length === actual.length && timingSafeEqual(expected, actual), upgradedHash: undefined as string | undefined };
+  }
+
+  const expected = Buffer.from(stored);
+  const actual = Buffer.from(password);
+  const valid = expected.length === actual.length && timingSafeEqual(expected, actual);
+  return { valid, upgradedHash: valid ? await hashPassword(password) : undefined };
+}
+
+function tokenHash(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function issueSession(role: AuthSession["role"], userId?: number) {
+  const token = randomBytes(32).toString("base64url");
+  const lifetimeMs = role === "admin" ? 8 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+  authSessions.push({
+    token_hash: tokenHash(token),
+    role,
+    user_id: userId,
+    created_at: now(),
+    expires_at: new Date(Date.now() + lifetimeMs).toISOString(),
+  });
+  return token;
+}
+
+function sessionFromRequest(req: Request) {
+  const authorization = req.header("authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match) return undefined;
+  const hash = tokenHash(match[1]);
+  const session = authSessions.find((candidate) => candidate.token_hash === hash);
+  if (!session || new Date(session.expires_at).getTime() <= Date.now()) {
+    if (session) authSessions.splice(authSessions.indexOf(session), 1);
+    return undefined;
+  }
+  return session;
+}
+
 function userFromRequest(req: Request) {
-  const id = Number(req.header("x-user-id"));
-  return Number.isFinite(id) ? users.find((user) => user.id === id) : undefined;
+  const session = sessionFromRequest(req);
+  if (session?.role !== "user" || !session.user_id) return undefined;
+  return users.find((user) => user.id === session.user_id && user.is_active && !user.is_banned);
 }
 
 function requireUser(req: Request, res: any) {
@@ -359,22 +454,28 @@ function completeKey(userId: number, taskId: number) {
 }
 
 function gameKey(userId: number, gameType: string) {
-  return `${userId}:${gameType}`;
+  return `${userId}:${new Date().toISOString().slice(0, 10)}:${gameType}`;
+}
+
+function dailyUserKey(userId: number) {
+  return `${userId}:${new Date().toISOString().slice(0, 10)}`;
 }
 
 function generateCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(randomInt(100000, 1_000_000));
 }
 
 function activationForUser(userId: number) {
   return activationRequests.find((request) => request.user_id === userId && request.status !== "used" && request.status !== "expired");
 }
 
-router.post("/auth/register", (req, res) => {
+router.post("/auth/register", async (req, res) => {
   const fullName = String(req.body.fullName ?? "").trim();
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
-  if (!fullName || !email || !password) return res.status(400).json({ error: "Name, email, and password are required" });
+  if (!fullName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 6) {
+    return res.status(400).json({ error: "Enter a valid email, name, and password with at least 6 characters" });
+  }
   if (users.some((user) => user.email === email)) return res.status(400).json({ error: "Email already registered" });
   const referralCode = String(req.body.referralCode ?? "").trim();
   if (referralCode && !users.some((candidate) => candidate.referral_code.toLowerCase() === referralCode.toLowerCase())) {
@@ -385,7 +486,7 @@ router.post("/auth/register", (req, res) => {
     id: nextUserId++,
     full_name: fullName,
     email,
-    password,
+    password: await hashPassword(password),
     referral_code: email.split("@")[0],
     referred_by: referralCode || undefined,
     balance: "0.00",
@@ -412,14 +513,17 @@ router.post("/auth/register", (req, res) => {
       message: "Your account was created. Ask admin for the activation code.",
     });
   }
-  return res.json({ user: publicUser(user) });
+  return res.json({ user: publicUser(user), token: issueSession("user", user.id) });
 });
 
-router.post("/auth/login", (req, res) => {
+router.post("/auth/login", async (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
-  const user = users.find((candidate) => candidate.email === email && candidate.password === password);
+  const user = users.find((candidate) => candidate.email === email);
   if (!user) return res.status(401).json({ error: "Invalid email or password" });
+  const passwordCheck = await verifyPassword(user.password, password);
+  if (!passwordCheck.valid) return res.status(401).json({ error: "Invalid email or password" });
+  if (passwordCheck.upgradedHash) user.password = passwordCheck.upgradedHash;
   if (user.is_banned) return res.status(403).json({ error: "Account suspended" });
   if (!user.is_active) {
     return res.status(403).json({
@@ -430,12 +534,18 @@ router.post("/auth/login", (req, res) => {
     });
   }
   user.last_login = now();
-  return res.json({ user: publicUser(user) });
+  return res.json({ user: publicUser(user), token: issueSession("user", user.id) });
 });
 
 router.get("/auth/me", (req, res) => {
   const user = requireUser(req, res);
   return user ? res.json({ user: publicUser(user) }) : undefined;
+});
+
+router.post("/auth/logout", (req, res) => {
+  const session = sessionFromRequest(req);
+  if (session) authSessions.splice(authSessions.indexOf(session), 1);
+  return res.json({ success: true });
 });
 
 router.put("/auth/profile", (req, res) => {
@@ -468,29 +578,73 @@ router.post("/auth/activation/verify", (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const code = String(req.body.code ?? "").trim();
   const user = users.find((candidate) => candidate.email === email);
-  const request = user ? activationRequests.find((candidate) => candidate.user_id === user.id && candidate.status === "approved") : undefined;
-  if (!user || !request || !request.code || request.code !== code || !request.expires_at || new Date(request.expires_at) < new Date()) {
+  const request = user ? activationRequests.find((candidate) =>
+    candidate.user_id === user.id &&
+    candidate.status === "approved" &&
+    candidate.code === code &&
+    candidate.expires_at &&
+    new Date(candidate.expires_at).getTime() > Date.now()
+  ) : undefined;
+  if (!user || user.is_banned || !request || !request.code || request.code !== code || !request.expires_at || new Date(request.expires_at) < new Date()) {
     return res.status(400).json({ error: "Invalid or expired activation code" });
   }
   user.is_active = true;
   request.status = "used";
-  return res.json({ success: true, user: publicUser(user) });
+  return res.json({ success: true, user: publicUser(user), token: issueSession("user", user.id) });
 });
 
 router.post("/auth/forgot-password", (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const user = users.find((candidate) => candidate.email === email);
-  if (!user) return res.status(404).json({ error: "Account not found" });
-  return res.json({ success: true, message: "Reset request submitted." });
+  if (user && !user.is_banned) {
+    const existing = passwordResetRequests.find((candidate) => candidate.user_id === user.id && candidate.status === "pending");
+    const usableApproved = passwordResetRequests.some((candidate) =>
+      candidate.user_id === user.id &&
+      candidate.status === "approved" &&
+      candidate.expires_at &&
+      new Date(candidate.expires_at).getTime() > Date.now()
+    );
+    if (!existing && !usableApproved) {
+      passwordResetRequests.push({
+        id: nextPasswordResetId++,
+        user_id: user.id,
+        email: user.email,
+        status: "pending",
+        created_at: now(),
+      });
+    }
+  }
+  return res.json({ success: true, message: "If the account exists, a reset request has been submitted." });
 });
-router.post("/auth/reset-password", (req, res) => res.json({ success: true }));
+router.post("/auth/reset-password", async (req, res) => {
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const code = String(req.body.code ?? "").trim();
+  const newPassword = String(req.body.newPassword ?? "");
+  if (newPassword.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+  const user = users.find((candidate) => candidate.email === email);
+  const reset = user && passwordResetRequests.find((candidate) =>
+    candidate.user_id === user.id &&
+    candidate.status === "approved" &&
+    candidate.code === code &&
+    Boolean(candidate.expires_at) &&
+    new Date(candidate.expires_at!).getTime() > Date.now()
+  );
+  if (!user || !reset) return res.status(400).json({ error: "Invalid or expired reset code" });
+  user.password = await hashPassword(newPassword);
+  passwordResetRequests.filter((candidate) => candidate.user_id === user.id).forEach((candidate) => {
+    candidate.status = "used";
+    delete candidate.code;
+  });
+  authSessions.splice(0, authSessions.length, ...authSessions.filter((session) => session.user_id !== user.id));
+  return res.json({ success: true });
+});
 
 router.get("/settings/public", (_req, res) => res.json(settings));
 
 router.get("/ads/status", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
-  const watched = adWatches.get(String(user.id)) ?? 0;
+  const watched = adWatches.get(dailyUserKey(user.id)) ?? 0;
   const maxAds = Number(settings.max_ads_per_day);
   return res.json({ watched, maxAds, remaining: Math.max(0, maxAds - watched), reward: Number(settings.ad_reward), adsEnabled: true });
 });
@@ -498,7 +652,7 @@ router.get("/ads/status", (req, res) => {
 router.post("/ads/watch", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
-  const key = String(user.id);
+  const key = dailyUserKey(user.id);
   const watched = adWatches.get(key) ?? 0;
   const maxAds = Number(settings.max_ads_per_day);
   if (watched >= maxAds) return res.status(400).json({ error: "Daily ad limit reached" });
@@ -512,13 +666,13 @@ router.post("/ads/watch", (req, res) => {
 router.get("/checkin/status", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
-  return res.json({ checkedIn: checkins.has(String(user.id)), reward: Number(settings.checkin_reward) });
+  return res.json({ checkedIn: checkins.has(dailyUserKey(user.id)), reward: Number(settings.checkin_reward) });
 });
 
 router.post("/checkin", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
-  const key = String(user.id);
+  const key = dailyUserKey(user.id);
   if (checkins.has(key)) return res.status(400).json({ error: "Already checked in today" });
   checkins.add(key);
   const reward = Number(settings.checkin_reward);
@@ -537,7 +691,7 @@ router.post("/tasks/:id/complete", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   const task = tasks.find((item) => item.id === Number(req.params.id));
-  if (!task) return res.status(404).json({ error: "Task not found" });
+  if (!task || !task.is_active) return res.status(404).json({ error: "Task not found or inactive" });
   const key = completeKey(user.id, task.id);
   if (completedTasks.has(key)) return res.status(400).json({ error: "Task already completed" });
   completedTasks.add(key);
@@ -590,15 +744,36 @@ router.post("/games/quiz/start", (req, res) => {
   if (quizSessions.some((session) => session.user_id === user.id && session.completed_at?.slice(0, 10) === today)) {
     return res.status(400).json({ error: "Today's quiz has already been completed." });
   }
+  const existing = quizSessions.find((session) =>
+    session.user_id === user.id &&
+    !session.completed_at &&
+    session.started_at.slice(0, 10) === today
+  );
+  if (existing) {
+    const question = quizQuestions.find((candidate) => candidate.id === existing.question_ids[existing.current_index]);
+    if (question) {
+      return res.json({
+        sessionId: existing.id,
+        totalQuestions: existing.question_ids.length,
+        questionNumber: existing.current_index + 1,
+        question: { id: question.id, question: question.question, options: question.options, category: question.category },
+        shownAt: existing.question_started_at ?? existing.started_at,
+      });
+    }
+    return res.status(409).json({ error: "This quiz changed. Please contact support before starting another." });
+  }
   const questions = dailyQuizQuestions(user.id);
   if (questions.length < 15) return res.status(503).json({ error: "Quiz is being prepared. Please try again later." });
+  const startedAt = now();
   const session: QuizSession = {
     id: `quiz-${user.id}-${nextQuizSessionId++}`,
     user_id: user.id,
     question_ids: questions.map((question) => question.id),
     current_index: 0,
     correct: 0,
-    started_at: now(),
+    started_at: startedAt,
+    question_started_at: startedAt,
+    total_elapsed_ms: 0,
   };
   quizSessions.push(session);
   return res.json({
@@ -615,16 +790,22 @@ router.post("/games/quiz/answer", (req, res) => {
   if (!user) return;
   const session = quizSessions.find((candidate) => candidate.id === String(req.body.sessionId) && candidate.user_id === user.id);
   if (!session || session.completed_at) return res.status(400).json({ error: "Quiz session is not active." });
+  if (session.started_at.slice(0, 10) !== new Date().toISOString().slice(0, 10)) {
+    return res.status(400).json({ error: "This quiz has expired. Start today's quiz instead." });
+  }
   const question = quizQuestions.find((candidate) => candidate.id === session.question_ids[session.current_index]);
   if (!question) return res.status(400).json({ error: "Question not found." });
   const selected = Number(req.body.answer);
-  const elapsedMs = Math.max(0, Number(req.body.elapsedMs) || 0);
+  const questionStartedAt = new Date(session.question_started_at ?? session.started_at).getTime();
+  const elapsedMs = Math.max(0, Date.now() - (Number.isFinite(questionStartedAt) ? questionStartedAt : Date.now()));
+  session.total_elapsed_ms = (session.total_elapsed_ms ?? 0) + elapsedMs;
   const correct = selected === question.answer;
   if (correct) session.correct += 1;
   const nextIndex = session.current_index + 1;
   const total = session.question_ids.length;
   if (nextIndex < total) {
     session.current_index = nextIndex;
+    session.question_started_at = now();
     const nextQuestion = quizQuestions.find((candidate) => candidate.id === session.question_ids[nextIndex]);
     return res.json({
       correct,
@@ -636,7 +817,8 @@ router.post("/games/quiz/answer", (req, res) => {
   }
   const accuracy = session.correct / total;
   const limit = Math.max(5, Number(settings.quiz_time_limit_seconds) || 12) * 1000;
-  const speedFactor = Math.max(0.5, Math.min(1, 1 - (elapsedMs / limit) * 0.5));
+  const averageAnswerMs = session.total_elapsed_ms / total;
+  const speedFactor = Math.max(0.5, Math.min(1, 1 - (averageAnswerMs / limit) * 0.5));
   const reward = Math.max(0.1, Math.round((Number(settings.quiz_base_reward) * accuracy * speedFactor) * 100) / 100);
   session.completed_at = now();
   session.reward = reward;
@@ -720,7 +902,7 @@ router.post("/events/:id/claim", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   const event = events.find((item) => item.id === Number(req.params.id));
-  if (!event) return res.status(404).json({ error: "Event not found" });
+  if (!event || !event.is_active) return res.status(404).json({ error: "Event not found or inactive" });
   const key = `${user.id}:${event.id}`;
   if (claimedEvents.has(key)) return res.status(400).json({ error: "Already claimed" });
   claimedEvents.add(key);
@@ -821,21 +1003,68 @@ router.post("/support/reopen", (req, res) => {
   return res.json({ conversation: conversationView(conversation) });
 });
 
-router.post("/admin/login", (req, res) => {
-  if (String(req.body.pin ?? "") !== adminPin) return res.status(401).json({ error: "Invalid PIN" });
-  return res.json({ success: true, token: "demo-admin-token" });
+function adminLoginKey(req: Request) {
+  return req.ip || req.socket.remoteAddress || "unknown";
+}
+
+function adminLoginIsBlocked(req: Request) {
+  const key = adminLoginKey(req);
+  const attempt = adminLoginFailures.get(key);
+  if (!attempt) return false;
+  if (attempt.blockedUntil > Date.now()) return true;
+  if (Date.now() - attempt.windowStartedAt >= 15 * 60 * 1000) adminLoginFailures.delete(key);
+  return false;
+}
+
+function recordAdminLoginFailure(req: Request) {
+  const key = adminLoginKey(req);
+  const current = adminLoginFailures.get(key);
+  const fresh = !current || Date.now() - current.windowStartedAt >= 15 * 60 * 1000;
+  const attempt = fresh ? { attempts: 0, windowStartedAt: Date.now(), blockedUntil: 0 } : current;
+  attempt.attempts += 1;
+  if (attempt.attempts >= 5) attempt.blockedUntil = Date.now() + 15 * 60 * 1000;
+  adminLoginFailures.set(key, attempt);
+}
+
+router.post("/admin/login", async (req, res) => {
+  if (process.env.NODE_ENV === "production" && !adminPinConfigured) {
+    return res.status(503).json({ error: "Admin PIN is not configured for this environment." });
+  }
+  if (adminLoginIsBlocked(req)) return res.status(429).json({ error: "Too many failed attempts. Try again in 15 minutes." });
+  const suppliedPin = String(req.body.pin ?? "");
+  const pinCheck = await verifyPassword(adminPin, suppliedPin);
+  if (!pinCheck.valid) {
+    recordAdminLoginFailure(req);
+    return res.status(401).json({ error: "Invalid PIN" });
+  }
+  adminLoginFailures.delete(adminLoginKey(req));
+  if (pinCheck.upgradedHash && (adminPinConfigured || suppliedPin !== "1234")) adminPin = pinCheck.upgradedHash;
+  return res.json({ success: true, token: issueSession("admin") });
 });
 
-router.post("/admin/email-login", (req, res) => {
-  const email = String(req.body.email ?? "").toLowerCase();
-  const user = users.find((candidate) => candidate.email === email && candidate.password === String(req.body.password ?? ""));
-  if (!user || !user.isAdmin) return res.status(401).json({ error: "Invalid credentials" });
-  return res.json({ success: true, token: "demo-admin-token" });
+router.post("/admin/email-login", async (req, res) => {
+  if (adminLoginIsBlocked(req)) return res.status(429).json({ error: "Too many failed attempts. Try again in 15 minutes." });
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const user = users.find((candidate) => candidate.email === email);
+  const passwordCheck = user ? await verifyPassword(user.password, String(req.body.password ?? "")) : undefined;
+  if (user && passwordCheck?.valid && passwordCheck.upgradedHash) user.password = passwordCheck.upgradedHash;
+  if (!user || !user.isAdmin || !user.is_active || user.is_banned || !passwordCheck?.valid) {
+    recordAdminLoginFailure(req);
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  adminLoginFailures.delete(adminLoginKey(req));
+  return res.json({ success: true, token: issueSession("admin", user.id) });
 });
 
 function isAdmin(req: Request) {
-  return req.header("x-admin-token") === "demo-admin-token";
+  return sessionFromRequest(req)?.role === "admin";
 }
+
+router.post("/admin/logout", (req, res) => {
+  const session = sessionFromRequest(req);
+  if (session?.role === "admin") authSessions.splice(authSessions.indexOf(session), 1);
+  return res.json({ success: true });
+});
 
 function adminOnly(req: Request, res: any) {
   if (!isAdmin(req)) {
@@ -1042,18 +1271,63 @@ router.post("/admin/support/:conversationId/claim", (req, res) => {
 
 router.get("/admin/password-resets", (req, res) => {
   if (!adminOnly(req, res)) return;
-  return res.json({ resets: [] });
+  for (const request of passwordResetRequests) {
+    if (request.status === "approved" && request.expires_at && new Date(request.expires_at).getTime() <= Date.now()) {
+      request.status = "expired";
+      delete request.code;
+    }
+  }
+  return res.json({
+    resets: passwordResetRequests.map((request) => ({
+      ...request,
+      token: request.code,
+      display_status: request.status,
+      full_name: users.find((user) => user.id === request.user_id)?.full_name ?? "Unknown",
+    })),
+  });
+});
+router.post("/admin/password-resets/:id/approve", (req, res) => {
+  if (!adminOnly(req, res)) return;
+  const request = passwordResetRequests.find((candidate) => candidate.id === Number(req.params.id));
+  if (!request || request.status !== "pending") return res.status(404).json({ error: "Pending reset request not found" });
+  const user = users.find((candidate) => candidate.id === request.user_id);
+  if (!user || user.is_banned) return res.status(400).json({ error: "User account cannot reset its password" });
+  request.status = "approved";
+  request.code = generateCode();
+  request.approved_at = now();
+  request.expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  return res.json({ reset: { id: request.id, token: request.code, expires_at: request.expires_at } });
 });
 router.post("/admin/generate-reset-code", (req, res) => {
   if (!adminOnly(req, res)) return;
-  return res.json({ code: generateCode() });
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const user = users.find((candidate) => candidate.email === email);
+  if (!user || user.is_banned) return res.status(404).json({ error: "User account not found" });
+  let request = passwordResetRequests.find((candidate) => candidate.user_id === user.id && candidate.status === "pending");
+  if (!request) {
+    request = {
+      id: nextPasswordResetId++,
+      user_id: user.id,
+      email: user.email,
+      status: "pending",
+      created_at: now(),
+    };
+    passwordResetRequests.push(request);
+  }
+  request.status = "approved";
+  request.code = generateCode();
+  request.approved_at = now();
+  request.expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  return res.json({ code: request.code, expires_at: request.expires_at });
 });
-router.post("/admin/change-pin", (req, res) => {
+router.post("/admin/change-pin", async (req, res) => {
   if (!adminOnly(req, res)) return;
-  if (String(req.body.currentPin ?? "") !== adminPin) return res.status(400).json({ error: "Current PIN is invalid" });
+  const currentPinCheck = await verifyPassword(adminPin, String(req.body.currentPin ?? ""));
+  if (!currentPinCheck.valid) return res.status(400).json({ error: "Current PIN is invalid" });
   const nextPin = String(req.body.newPin ?? "");
-  if (!/^\d{4,8}$/.test(nextPin)) return res.status(400).json({ error: "New PIN must contain 4 to 8 digits" });
-  adminPin = nextPin;
+  if (!/^\d{6,8}$/.test(nextPin)) return res.status(400).json({ error: "New PIN must contain 6 to 8 digits" });
+  adminPin = await hashPassword(nextPin);
+  adminPinConfigured = true;
   persistState();
   return res.json({ success: true });
 });

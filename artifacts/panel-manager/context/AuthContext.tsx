@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { apiRequest, getApiUrl } from "@/lib/query-client";
+import { apiRequest, getApiUrl, getUserAuthHeaders, setSessionToken } from "@/lib/query-client";
 
 interface User {
   id: number;
@@ -47,44 +47,66 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     loadUser();
   }, []);
 
+  async function storeAuthSession(nextUser: User, token: string) {
+    setSessionToken(token);
+    setUser(nextUser);
+    await AsyncStorage.multiSet([
+      ["user", JSON.stringify(nextUser)],
+      ["user_session_token", token],
+    ]);
+  }
+
   async function loadUser() {
     try {
-      const stored = await AsyncStorage.getItem("user");
-      if (stored) {
+      const [stored, token] = await AsyncStorage.multiGet(["user", "user_session_token"]).then((items) => [
+        items[0][1],
+        items[1][1],
+      ]);
+      if (stored && token) {
+        setSessionToken(token);
         const parsed = JSON.parse(stored);
         setUser(parsed);
-        await refreshUserWithId(parsed.id);
+        await refreshUserWithToken(token);
+      } else {
+        setSessionToken(null);
+        setUser(null);
+        await AsyncStorage.multiRemove(["user", "user_session_token"]);
       }
     } catch {
-      // ignore
+      setSessionToken(null);
+      setUser(null);
+      await AsyncStorage.multiRemove(["user", "user_session_token"]);
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function refreshUserWithId(userId: number) {
+  async function refreshUserWithToken(token: string) {
     try {
       const res = await fetch(`${getApiUrl()}api/auth/me`, {
-        headers: { "x-user-id": String(userId) },
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
         setUser(data.user);
         await AsyncStorage.setItem("user", JSON.stringify(data.user));
       } else if (res.status === 404 || res.status === 401) {
-        // The account may have been deleted or invalidated remotely.
-        // Do not keep showing a stale locally cached session.
+        setSessionToken(null);
         setUser(null);
-        await AsyncStorage.removeItem("user");
+        await AsyncStorage.multiRemove(["user", "user_session_token"]);
       }
     } catch {
-      // ignore
+      // Keep the session cached when the API is temporarily unavailable.
     }
   }
 
   async function refreshUser() {
-    if (!user) return;
-    await refreshUserWithId(user.id);
+    if (!user || !getUserAuthHeaders().Authorization) return;
+    const res = await fetch(`${getApiUrl()}api/auth/me`, { headers: getUserAuthHeaders() });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not refresh account");
+    const data = await res.json();
+    setUser(data.user);
+    await AsyncStorage.setItem("user", JSON.stringify(data.user));
   }
 
   async function login(email: string, password: string, deviceId?: string) {
@@ -96,8 +118,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error.email = data.email;
       throw error;
     }
-    setUser(data.user);
-    await AsyncStorage.setItem("user", JSON.stringify(data.user));
+    if (!data.token) throw new Error("Login did not create a session. Please try again.");
+    await storeAuthSession(data.user, data.token);
   }
 
   async function register(data: RegisterData) {
@@ -109,31 +131,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error.code = "ACCOUNT_NOT_ACTIVE";
       throw error;
     }
-    setUser(result.user);
-    await AsyncStorage.setItem("user", JSON.stringify(result.user));
+    if (!result.token) throw new Error("Registration did not create a session. Please try again.");
+    await storeAuthSession(result.user, result.token);
   }
 
   async function activate(email: string, code: string) {
     const res = await apiRequest("POST", "/api/auth/activation/verify", { email, code });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Activation failed");
-    setUser(data.user);
-    await AsyncStorage.setItem("user", JSON.stringify(data.user));
+    if (!data.token) throw new Error("Activation did not create a session. Please try again.");
+    await storeAuthSession(data.user, data.token);
   }
 
   async function logout() {
+    try {
+      await apiRequest("POST", "/api/auth/logout");
+    } catch {
+      // Clear local credentials even if the API is unavailable.
+    }
+    setSessionToken(null);
     setUser(null);
-    await AsyncStorage.removeItem("user");
+    await AsyncStorage.multiRemove(["user", "user_session_token"]);
   }
 
   async function updateProfile(fullName: string) {
     if (!user) return;
     const res = await fetch(`${getApiUrl()}api/auth/profile`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json", "x-user-id": String(user.id) },
+      headers: { ...getUserAuthHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ fullName }),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not update profile");
     setUser(data.user);
     await AsyncStorage.setItem("user", JSON.stringify(data.user));
   }
@@ -142,10 +171,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user) return;
     const res = await fetch(`${getApiUrl()}api/auth/profile-photo`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json", "x-user-id": String(user.id) },
+      headers: { ...getUserAuthHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ photoUrl }),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not update profile photo");
     setUser(data.user);
     await AsyncStorage.setItem("user", JSON.stringify(data.user));
   }

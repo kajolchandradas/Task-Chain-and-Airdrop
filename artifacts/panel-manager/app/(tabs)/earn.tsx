@@ -10,12 +10,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import { useAd } from "@/context/AdContext";
 import Colors from "@/constants/colors";
-import { getApiUrl } from "@/lib/query-client";
+import { getApiUrl, getUserAuthHeaders } from "@/lib/query-client";
 import * as Haptics from "expo-haptics";
 import * as Linking from "expo-linking";
 
-function authHeader(userId: number) {
-  return { "x-user-id": String(userId) };
+function authHeader(_userId: number) {
+  return getUserAuthHeaders();
 }
 
 function apiGet(userId: number, path: string) {

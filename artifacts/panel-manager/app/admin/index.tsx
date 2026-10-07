@@ -57,7 +57,7 @@ export default function AdminLoginScreen() {
           <Text style={styles.sub}>Enter your PIN to unlock the admin panel</Text>
 
           <View style={styles.pinBox}>
-            {[0, 1, 2, 3].map((i) => (
+            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
               <View key={i} style={[styles.pinDot, { backgroundColor: pin.length > i ? Colors.primary : Colors.dark.border }]} />
             ))}
           </View>
@@ -98,7 +98,7 @@ export default function AdminLoginScreen() {
             </View>
             <View style={styles.credDivider} />
             <Text style={styles.credNote}>
-              Admin Panel শুধুমাত্র authorized email দিয়ে login করলে Home screen থেকেও access করা যাবে।{"\n\n"}Default PIN: 1234 — প্রথম login এর পরেই পরিবর্তন করুন।
+              Admin access uses a private workspace PIN. Keep it confidential and update it in Security after setup.
             </Text>
           </View>
         </View>
