@@ -189,7 +189,7 @@ let nextSupportMessageId = 1;
 let nextQuizSessionId = 1;
 let nextNotificationId = 3;
 const configuredAdminPin = process.env.ADMIN_PIN?.trim();
-const hasValidConfiguredAdminPin = Boolean(configuredAdminPin && /^\d{6,8}$/.test(configuredAdminPin));
+const hasValidConfiguredAdminPin = Boolean(configuredAdminPin && configuredAdminPin.length >= 6 && configuredAdminPin.length <= 128);
 let adminPin = hasValidConfiguredAdminPin ? configuredAdminPin! : "1234";
 let adminPinConfigured = hasValidConfiguredAdminPin;
 let adminPinEnvFingerprint: string | undefined;
@@ -1068,7 +1068,7 @@ function recordAdminLoginFailure(req: Request) {
 
 router.post("/admin/login", async (req, res) => {
   if (!adminPinConfigured) {
-    return res.status(503).json({ error: "Set a valid 6–8 digit ADMIN_PIN secret before using PIN login." });
+    return res.status(503).json({ error: "Set an ADMIN_PIN secret with at least 6 characters before using admin login." });
   }
   if (adminLoginIsBlocked(req)) return res.status(429).json({ error: "Too many failed attempts. Try again in 15 minutes." });
   const suppliedPin = String(req.body.pin ?? "");

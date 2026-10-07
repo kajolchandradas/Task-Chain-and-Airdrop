@@ -54,7 +54,7 @@ export default function AdminLoginScreen() {
             <Ionicons name="shield-checkmark" size={48} color={Colors.primary} />
           </View>
           <Text style={styles.title}>Admin Access</Text>
-          <Text style={styles.sub}>Enter your PIN to unlock the admin panel</Text>
+          <Text style={styles.sub}>Enter your admin PIN or password</Text>
 
           <View style={styles.pinBox}>
             {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
@@ -66,13 +66,14 @@ export default function AdminLoginScreen() {
             <Ionicons name="lock-closed" size={20} color={Colors.dark.textMuted} />
             <TextInput
               style={styles.pinField}
-              placeholder="Enter PIN"
+              placeholder="Enter PIN or password"
               placeholderTextColor={Colors.dark.textMuted}
               value={pin}
               onChangeText={setPin}
               secureTextEntry
-              keyboardType="numeric"
-              maxLength={8}
+              autoCapitalize="none"
+              autoCorrect={false}
+              maxLength={128}
             />
           </View>
 
@@ -98,7 +99,7 @@ export default function AdminLoginScreen() {
             </View>
             <View style={styles.credDivider} />
             <Text style={styles.credNote}>
-              Admin access uses a private workspace PIN. Keep it confidential and update it in Security after setup.
+              Admin access uses a private workspace credential. Keep it confidential and update it in Security after setup.
             </Text>
           </View>
         </View>
