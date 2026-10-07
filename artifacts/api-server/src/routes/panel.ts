@@ -188,8 +188,10 @@ let nextConversationId = 1;
 let nextSupportMessageId = 1;
 let nextQuizSessionId = 1;
 let nextNotificationId = 3;
-let adminPin = process.env.ADMIN_PIN ?? "1234";
-let adminPinConfigured = Boolean(process.env.ADMIN_PIN);
+const configuredAdminPin = process.env.ADMIN_PIN;
+const hasValidConfiguredAdminPin = Boolean(configuredAdminPin && /^\d{6,8}$/.test(configuredAdminPin));
+let adminPin = hasValidConfiguredAdminPin ? configuredAdminPin! : "1234";
+let adminPinConfigured = hasValidConfiguredAdminPin;
 const adminLoginFailures = new Map<string, { attempts: number; windowStartedAt: number; blockedUntil: number }>();
 
 const tasks: Task[] = [
@@ -314,12 +316,12 @@ async function loadPersistedState() {
     nextSupportMessageId = state.counters?.nextSupportMessageId ?? (Math.max(0, ...supportMessages.map((m) => m.id)) + 1);
     nextQuizSessionId = state.counters?.nextQuizSessionId ?? (Math.max(0, ...quizSessions.map((s) => Number(s.id))) + 1);
     nextNotificationId = state.counters?.nextNotificationId ?? (Math.max(0, ...notifications.map((n) => n.id)) + 1);
-    if (process.env.ADMIN_PIN && state.adminPin === "1234") {
-      adminPin = process.env.ADMIN_PIN;
+    if (hasValidConfiguredAdminPin && state.adminPin === "1234") {
+      adminPin = configuredAdminPin!;
       adminPinConfigured = true;
     } else if (state.adminPin) {
       adminPin = state.adminPin;
-      adminPinConfigured = state.adminPin !== "1234" || Boolean(process.env.ADMIN_PIN);
+      adminPinConfigured = state.adminPin !== "1234" || hasValidConfiguredAdminPin;
     }
   } finally {
     resolveStateReady?.();
@@ -362,7 +364,7 @@ router.use((_req, res, next) => {
 
 function publicUser(user: User) {
   const { password: _password, ...safe } = user;
-  return { ...safe, isAdmin: user.email === "admin@earnwallet.app" };
+  return { ...safe, isAdmin: user.isAdmin === true };
 }
 
 async function hashPassword(password: string) {
@@ -525,6 +527,7 @@ router.post("/auth/login", async (req, res) => {
   if (!passwordCheck.valid) return res.status(401).json({ error: "Invalid email or password" });
   if (passwordCheck.upgradedHash) user.password = passwordCheck.upgradedHash;
   if (user.is_banned) return res.status(403).json({ error: "Account suspended" });
+  if (user.isAdmin) user.is_active = true;
   if (!user.is_active) {
     return res.status(403).json({
       error: "Account is not active. Enter the secret activation code.",
@@ -644,14 +647,18 @@ router.get("/settings/public", (_req, res) => res.json(settings));
 router.get("/ads/status", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
+  const adsEnabled = settings.ads_enabled !== "false" && settings.ads_on_watch !== "false";
   const watched = adWatches.get(dailyUserKey(user.id)) ?? 0;
   const maxAds = Number(settings.max_ads_per_day);
-  return res.json({ watched, maxAds, remaining: Math.max(0, maxAds - watched), reward: Number(settings.ad_reward), adsEnabled: true });
+  return res.json({ watched, maxAds, remaining: Math.max(0, maxAds - watched), reward: Number(settings.ad_reward), adsEnabled });
 });
 
 router.post("/ads/watch", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
+  if (settings.ads_enabled === "false" || settings.ads_on_watch === "false") {
+    return res.status(403).json({ error: "Rewarded ads are currently disabled" });
+  }
   const key = dailyUserKey(user.id);
   const watched = adWatches.get(key) ?? 0;
   const maxAds = Number(settings.max_ads_per_day);
@@ -717,6 +724,9 @@ router.get("/games/status", (req, res) => {
       questionsPerPlay: Number(settings.quiz_questions_per_play),
       maxQuestionsPerPlay: Number(settings.quiz_max_questions_per_play),
     });
+  }
+  if (!["spin_wheel", "scratch_card", "spin_split", "lucky_spin"].includes(gameType)) {
+    return res.status(400).json({ error: "Unknown game type" });
   }
   const todayPlays = gamesPlayed.get(gameKey(user.id, gameType)) ?? 0;
   const allowedPlays = Number(settings.free_plays_per_day) + Number(settings.ad_plays_per_game);
@@ -832,11 +842,21 @@ router.post("/games/play", (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   const gameType = String(req.body.gameType ?? "spin_wheel");
+  if (!["spin_wheel", "scratch_card", "spin_split", "lucky_spin"].includes(gameType)) {
+    return res.status(400).json({ error: "Unknown game type" });
+  }
   const key = gameKey(user.id, gameType);
   const playsUsed = gamesPlayed.get(key) ?? 0;
-  const allowedPlays = Number(settings.free_plays_per_day) + Number(settings.ad_plays_per_game);
+  const freePlays = Math.max(0, Math.floor(Number(settings.free_plays_per_day) || 0));
+  const adPlays = Math.max(0, Math.floor(Number(settings.ad_plays_per_game) || 0));
+  const allowedPlays = freePlays + adPlays;
   if (playsUsed >= allowedPlays) return res.status(400).json({ error: "No plays remaining for today" });
-  const reward = Math.round((0.1 + Math.random() * 2.9) * 100) / 100;
+  if (playsUsed >= freePlays && req.body.usedAd !== true) {
+    return res.status(403).json({ error: "Watch a rewarded ad before using an extra play", requireAd: true });
+  }
+  const minimumCents = Math.max(1, Math.ceil(Number(settings.game_min_reward) * 100));
+  const maximumCents = Math.max(minimumCents, Math.floor(Number(settings.game_max_reward) * 100));
+  const reward = randomInt(minimumCents, maximumCents + 1) / 100;
   gamesPlayed.set(key, playsUsed + 1);
   addBalance(user, reward);
   addTransaction(user.id, reward, "game", `Played ${gameType}`, "Games");
@@ -1027,8 +1047,8 @@ function recordAdminLoginFailure(req: Request) {
 }
 
 router.post("/admin/login", async (req, res) => {
-  if (process.env.NODE_ENV === "production" && !adminPinConfigured) {
-    return res.status(503).json({ error: "Admin PIN is not configured for this environment." });
+  if (!adminPinConfigured) {
+    return res.status(503).json({ error: "Set a valid 6–8 digit ADMIN_PIN secret before using PIN login." });
   }
   if (adminLoginIsBlocked(req)) return res.status(429).json({ error: "Too many failed attempts. Try again in 15 minutes." });
   const suppliedPin = String(req.body.pin ?? "");
@@ -1122,6 +1142,7 @@ router.post("/admin/withdrawals/:id/approve", (req, res) => {
   if (!adminOnly(req, res)) return;
   const withdrawal = withdrawals.find((item) => item.id === Number(req.params.id));
   if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found" });
+  if (withdrawal.status !== "pending") return res.status(409).json({ error: "Only pending withdrawals can be approved" });
   withdrawal.status = "approved";
   return res.json({ withdrawal });
 });
@@ -1129,8 +1150,9 @@ router.post("/admin/withdrawals/:id/reject", (req, res) => {
   if (!adminOnly(req, res)) return;
   const withdrawal = withdrawals.find((item) => item.id === Number(req.params.id));
   if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found" });
+  if (withdrawal.status !== "pending") return res.status(409).json({ error: "Only pending withdrawals can be rejected" });
   const user = users.find((candidate) => candidate.id === withdrawal.user_id);
-  if (withdrawal.status === "pending" && user) {
+  if (user) {
     addBalance(user, Number(withdrawal.amount));
     addTransaction(user.id, Number(withdrawal.amount), "refund", "Withdrawal rejected and refunded", "Withdrawal");
   }

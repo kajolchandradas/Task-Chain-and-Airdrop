@@ -360,6 +360,7 @@ export default function AdminPanelScreen() {
   async function changePin() {
     if (!currentPin || !newPin || !confirmPin) return Alert.alert("Error", "Fill in all PIN fields");
     if (newPin.length < 6) return Alert.alert("Error", "New PIN must be at least 6 digits");
+    if (newPin.length > 8) return Alert.alert("Error", "New PIN must be no more than 8 digits");
     if (!/^\d+$/.test(newPin)) return Alert.alert("Error", "PIN must contain digits only");
     if (newPin !== confirmPin) return Alert.alert("Error", "PINs do not match");
     setSaving(true);
