@@ -192,6 +192,7 @@ const configuredAdminPin = process.env.ADMIN_PIN;
 const hasValidConfiguredAdminPin = Boolean(configuredAdminPin && /^\d{6,8}$/.test(configuredAdminPin));
 let adminPin = hasValidConfiguredAdminPin ? configuredAdminPin! : "1234";
 let adminPinConfigured = hasValidConfiguredAdminPin;
+let adminPinEnvFingerprint: string | undefined;
 const adminLoginFailures = new Map<string, { attempts: number; windowStartedAt: number; blockedUntil: number }>();
 
 const tasks: Task[] = [
@@ -270,6 +271,7 @@ type PersistedState = {
   settings: Record<string, string>;
   counters: Record<string, number>;
   adminPin?: string;
+  adminPinEnvFingerprint?: string;
 };
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -277,11 +279,17 @@ let resolveStateReady: (() => void) | undefined;
 const stateReady = new Promise<void>((resolve) => { resolveStateReady = resolve; });
 
 async function loadPersistedState() {
+  let shouldPersistAdminPinConfig = false;
   try {
     const rows = await db.select().from(panelState).where(eq(panelState.key, "main"));
     const state = rows[0]?.value as PersistedState | undefined;
     if (!state) {
-      resolveStateReady?.();
+      if (hasValidConfiguredAdminPin) {
+        adminPin = await hashPassword(configuredAdminPin!);
+        adminPinEnvFingerprint = adminPin;
+        adminPinConfigured = true;
+        shouldPersistAdminPinConfig = true;
+      }
       return;
     }
     users.push(...(state.users ?? []));
@@ -316,15 +324,26 @@ async function loadPersistedState() {
     nextSupportMessageId = state.counters?.nextSupportMessageId ?? (Math.max(0, ...supportMessages.map((m) => m.id)) + 1);
     nextQuizSessionId = state.counters?.nextQuizSessionId ?? (Math.max(0, ...quizSessions.map((s) => Number(s.id))) + 1);
     nextNotificationId = state.counters?.nextNotificationId ?? (Math.max(0, ...notifications.map((n) => n.id)) + 1);
-    if (hasValidConfiguredAdminPin && state.adminPin === "1234") {
-      adminPin = configuredAdminPin!;
+    adminPinEnvFingerprint = state.adminPinEnvFingerprint;
+    if (hasValidConfiguredAdminPin) {
+      const secretUnchanged = adminPinEnvFingerprint
+        ? (await verifyPassword(adminPinEnvFingerprint, configuredAdminPin!)).valid
+        : false;
+      if (!secretUnchanged) {
+        adminPin = await hashPassword(configuredAdminPin!);
+        adminPinEnvFingerprint = adminPin;
+        shouldPersistAdminPinConfig = true;
+      } else {
+        adminPin = state.adminPin ?? adminPinEnvFingerprint!;
+      }
       adminPinConfigured = true;
     } else if (state.adminPin) {
       adminPin = state.adminPin;
-      adminPinConfigured = state.adminPin !== "1234" || hasValidConfiguredAdminPin;
+      adminPinConfigured = state.adminPin !== "1234";
     }
   } finally {
     resolveStateReady?.();
+    if (shouldPersistAdminPinConfig) persistState();
   }
 }
 
@@ -344,6 +363,7 @@ function persistState() {
       notifications, settings,
       counters: { nextUserId, nextTransactionId, nextWithdrawalId, nextActivationId, nextPasswordResetId, nextConversationId, nextSupportMessageId, nextQuizSessionId, nextNotificationId },
       adminPin,
+      adminPinEnvFingerprint,
     };
     await db.insert(panelState).values({ key: "main", value, updatedAt: new Date() })
       .onConflictDoUpdate({ target: panelState.key, set: { value, updatedAt: new Date() } });
