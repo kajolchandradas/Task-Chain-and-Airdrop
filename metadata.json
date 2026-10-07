@@ -1,0 +1,6 @@
+{
+  "name": "Earn Wallet",
+  "description": "Rewards and task platform to earn via watching ads, daily tasks, spinning wheels, quizzes, and games with instant withdrawals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
